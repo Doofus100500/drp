@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ NETWORK = "infra-git-drp-home-restore"
 LABEL = "infra-git-drp-home.managed"
 CERT = "infra-git-drp-home"
 DEFAULTS = {"startup_timeout": 1800}
+DEFAULT_SSH_PORT = 22222
 BACKUP_FIELDS = ("repository", "region", "source_host", "environment")
 ACCESS_FIELDS = (*BACKUP_FIELDS, "s3_access_key", "s3_secret_key", "restic_password")
 
@@ -214,7 +216,7 @@ def inspect_backup(root):
         raise BadSnapshot("Некорректные метаданные бэкапа.") from None
 
 
-def gitlab_config(domain, storages, sidekiq=False):
+def gitlab_config(domain, storages, sidekiq=False, ssh_port=DEFAULT_SSH_PORT):
     storage_entries = ",\n".join(
         "  { name: " + json.dumps(name) + ", path: " +
         json.dumps(f"/var/opt/gitlab/git-data/{name}/repositories") + " }"
@@ -237,7 +239,7 @@ registry['registry_http_addr'] = '127.0.0.1:5001'
 gitlab_rails['registry_enabled'] = true
 gitlab_rails['registry_api_url'] = 'http://127.0.0.1:5001'
 gitlab_rails['registry_path'] = '/var/opt/gitlab/gitlab-rails/shared/registry'
-gitlab_rails['gitlab_shell_ssh_port'] = 2222
+gitlab_rails['gitlab_shell_ssh_port'] = {ssh_port}
 gitlab_sshd['enable'] = true
 gitlab_sshd['listen_address'] = '0.0.0.0:2222'
 gitlab_sshd['host_keys_dir'] = '/etc/gitlab/gitlab-sshd'
@@ -318,6 +320,8 @@ class Home:
     def __init__(self, base=BASE, etc=ETC):
         self.base, self.etc = base, etc
         self.config = {**DEFAULTS, **load_json(etc / "config.json")}
+        # Existing installations without this field keep their original published port.
+        self.config["ssh_port"] = ssh_port_number(self.config.get("ssh_port", 2222))
         validate_backup_settings(self.config)
         self.config["domain"] = domain_name(self.config["domain"])
         if self.config["mode"] not in ("direct", "proxy"):
@@ -444,7 +448,8 @@ class Home:
                 "--label", LABEL + "=true", "--restart=no", "--shm-size=256m"]
         if published:
             address = self.config["bind_ip"]
-            args += ["-p", f"{address}:8080:80", "-p", f"{address}:5080:5000", "-p", "2222:2222"]
+            args += ["-p", f"{address}:8080:80", "-p", f"{address}:5080:5000",
+                     "-p", f"{self.config['ssh_port']}:2222"]
         else:
             args += ["--network", NETWORK]
         for source, target in ((self.instance / "config", "/etc/gitlab"),
@@ -497,7 +502,7 @@ class Home:
                         self.instance / "config/gitlab-secrets.json")
         os.chmod(self.instance / "config/gitlab-secrets.json", 0o600)
         atomic_write(self.instance / "config/gitlab.rb",
-                     gitlab_config(self.config["domain"], backup["storages"]))
+                     gitlab_config(self.config["domain"], backup["storages"], ssh_port=self.config["ssh_port"]))
         self.start_container(backup["image"], published=False)
         self.wait_ready()
         self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "stop", "puma"], "Остановка Puma")
@@ -528,7 +533,8 @@ class Home:
         if "DRP_REPOSITORIES_VERIFIED=" not in result.stdout:
             raise BadSnapshot("Не получено подтверждение проверки репозиториев.")
         atomic_write(self.instance / "config/gitlab.rb",
-                     gitlab_config(self.config["domain"], backup["storages"], sidekiq=True))
+                     gitlab_config(self.config["domain"], backup["storages"], sidekiq=True,
+                                   ssh_port=self.config["ssh_port"]))
         self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "reconfigure"],
                  "Применение конфигурации GitLab", failure=BadSnapshot)
         self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "start", "puma"], "Запуск Puma")
@@ -667,13 +673,36 @@ def certificate_email(value):
     return value
 
 
-def proxy_guide(domain, address):
+def ssh_port_number(value):
+    if not re.fullmatch(r"[0-9]+", str(value)) or not 1 <= int(value) <= 65535:
+        raise Failure("Укажите номер TCP-порта от 1 до 65535.")
+    port = int(value)
+    if port in (80, 443, 5050, 8080, 5080):
+        raise Failure("Этот порт используется для HTTP/HTTPS GitLab или Registry. Выберите другой.")
+    return port
+
+
+def available_ssh_port(value):
+    port = ssh_port_number(value.strip() or DEFAULT_SSH_PORT)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("0.0.0.0", port))
+    except OSError:
+        raise Failure(f"TCP-порт {port} занят или недоступен на этой Ubuntu. Выберите другой.") from None
+    return port
+
+
+def proxy_guide(domain, address, ssh_port=DEFAULT_SSH_PORT):
     return f"""Настройка своего nginx для {domain}
 
-1. На роутере направьте TCP 80, 443, 5050 на сервер nginx, а 2222 — на Ubuntu.
+1. На роутере настройте перенаправление TCP-портов:
+   внешние 80, 443, 5050 → сервер nginx, те же номера портов;
+   внешний {ssh_port} → Ubuntu с GitLab, порт {ssh_port}.
+   Git по SSH подключается напрямую к Ubuntu с GitLab, без HTTP-прокси nginx.
    A-запись {domain} должна указывать на ваш публичный IPv4.
    Не добавляйте AAAA без отдельной настройки IPv6.
-   nginx должен видеть GitLab по http://{address}:8080 и Registry по http://{address}:5080.
+   {address} — адрес Ubuntu с GitLab, доступный вашему nginx.
+   В nginx укажите HTTP-адрес GitLab: http://{address}:8080; Registry: http://{address}:5080.
    Порты 8080/5080 не пробрасывайте в интернет.
 
 2. Скопируйте с Ubuntu на сервер nginx файлы:
@@ -725,7 +754,7 @@ def proxy_guide(domain, address):
 def access_instructions(config):
     domain = config["domain"]
     if config["mode"] == "proxy":
-        guide = proxy_guide(domain, config["bind_ip"])
+        guide = proxy_guide(domain, config["bind_ip"], config["ssh_port"])
         atomic_write(ETC / "nginx-setup.txt", guide)
         say("\nОсталось настроить ваш nginx. Памятка сохранена: " + str(ETC / "nginx-setup.txt"))
         say(guide)
@@ -733,7 +762,8 @@ def access_instructions(config):
         say("\nОткройте GitLab: https://" + domain)
         say("Войдите своим логином и паролем из поля password в сохранённом JSON.")
         say("Проверьте clone репозитория и pull известного образа.")
-    say("Container Registry: " + domain + ":5050; Git SSH: " + domain + ":2222.")
+    say("Container Registry: " + domain + ":5050")
+    say(f"Git по SSH: ssh://git@{domain}:{config['ssh_port']}/<group>/<project>.git")
     say("Бэкапы проверяются каждый час и после включения Ubuntu; локальные изменения заменяются при восстановлении.")
     say("Статус: sudo infra-git-drp-home status")
     say("Журнал: sudo journalctl -u infra-git-drp-home-sync.service")
@@ -763,23 +793,31 @@ def configure(profile_path=None):
     say("Нужен свой домен, например git.example.org. Создайте A-запись на ваш публичный IPv4.")
     say("Не добавляйте AAAA-запись без отдельной настройки IPv6.")
     domain = ask("Домен GitLab (без https:// и порта): ", domain_name)
-    say("\nШаг 3 из 3. HTTPS")
+    say("\nШаг 3 из 3. Сеть и HTTPS")
     say("1 — настроить nginx, сертификат и его продление автоматически на этой Ubuntu.")
     say("2 — использовать свой nginx; после восстановления получите готовые конфиги и памятку.")
     mode = ask("Ваш вариант [1]: ", https_mode)
+    say("\nВыберите TCP-порт для git clone/push по SSH, свободный на роутере и на этой Ubuntu.")
+    say("Один номер используется снаружи роутера и на Ubuntu с GitLab.")
+    ssh_port = ask(f"TCP-порт GitLab для SSH [{DEFAULT_SSH_PORT}]: ", available_ssh_port)
     email = ""
     address = "127.0.0.1"
     if mode == "direct":
-        say("На роутере пробросьте TCP 80, 443, 5050 и 2222 на эту Ubuntu.")
+        say(f"На роутере перенаправьте TCP 80, 443, 5050 и {ssh_port} на эту Ubuntu, сохранив номера портов.")
         say("Порт 80 понадобится и для выпуска, и для продления сертификата. Порты 8080/5080 оставьте внутренними.")
         say("Перед вводом email завершите настройку DNS и проброс портов: далее начнётся выпуск сертификата.")
         email = ask("Email для регистрации в Let's Encrypt: ", certificate_email)
     else:
-        say("Направьте TCP 80, 443, 5050 на сервер nginx, а 2222 — на Ubuntu с GitLab.")
-        say("Если nginx на другой машине, укажите LAN-IP этой Ubuntu, например 192.168.1.10.")
-        say("Если nginx на этой же машине, оставьте 127.0.0.1. Порты 8080/5080 должны быть доступны nginx.")
-        address = ask("IP Ubuntu для nginx [127.0.0.1]: ",
+        say("\nУкажите локальный IP этой Ubuntu, на которой разворачивается GitLab.")
+        say("nginx будет обращаться по этому адресу: порт 8080 — GitLab, порт 5080 — Container Registry.")
+        say("Для nginx на другом сервере или в Docker укажите LAN-IP этой Ubuntu, например 192.168.1.10.")
+        say("127.0.0.1 подходит, когда nginx установлен прямо на этой Ubuntu и работает вне контейнера.")
+        address = ask("IP Ubuntu с GitLab, доступный nginx [127.0.0.1]: ",
                       lambda value: str(ipaddress.IPv4Address(value.strip() or "127.0.0.1")))
+        say("На роутере: TCP 80, 443, 5050 → сервер nginx, те же номера портов.")
+        say(f"На роутере: TCP {ssh_port} → Ubuntu с GitLab, порт {ssh_port}; SSH идёт напрямую, без nginx.")
+        say(f"В nginx: GitLab → http://{address}:8080; Registry → http://{address}:5080.")
+        say("Порты 8080 и 5080 доступны nginx внутри вашей сети; проброс этих портов в интернет не нужен.")
     BASE.mkdir(mode=0o700, exist_ok=True)
     os.chmod(BASE, 0o700)
     atomic_write(BASE / ".managed", "infra-git-drp-home\n")
@@ -791,12 +829,12 @@ def configure(profile_path=None):
                      nginx_config(domain, backend=address, tls=False), mode=0o644)
         atomic_write(ETC / "nginx.conf.example",
                      nginx_config(domain, backend=address, cert_name=domain), mode=0o644)
-        atomic_write(ETC / "nginx-setup.txt", proxy_guide(domain, address))
+        atomic_write(ETC / "nginx-setup.txt", proxy_guide(domain, address, ssh_port))
         say("Конфиги и пошаговая памятка nginx созданы в " + str(ETC))
     # Written last, so an incomplete credential setup is not treated as installed.
     save_json(ETC / "config.json", {**DEFAULTS, **{key: profile[key] for key in BACKUP_FIELDS},
                                   "domain": domain, "mode": mode,
-                                  "email": email, "bind_ip": address})
+                                  "email": email, "bind_ip": address, "ssh_port": ssh_port})
 
 
 def main(argv=None):
@@ -819,6 +857,7 @@ def main(argv=None):
         say(json.dumps(home.state, indent=2, ensure_ascii=False))
         say("GitLab: https://" + home.config["domain"])
         say("Registry: https://" + home.config["domain"] + ":5050")
+        say(f"Git SSH: {home.config['domain']}:{home.config['ssh_port']}")
     elif args.command == "retry":
         with locked(home.base / "sync.lock"):
             home.state = load_json(home.state_path) if home.state_path.exists() else {}

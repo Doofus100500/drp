@@ -283,6 +283,31 @@ class SafetyTests(HomeCase):
         self.assertNotIn("sso.example.org", text)
         self.assertNotIn("repository_read_only", text)
 
+    def test_custom_ssh_port_is_published_and_advertised_consistently(self):
+        self.home.config["ssh_port"] = 23022
+        self.home.run = Mock()
+        self.home.start_container("fixture-image", published=True)
+        args = self.home.run.call_args.args[0]
+        self.assertIn("23022:2222", args)
+        self.assertNotIn("2222:2222", args)
+        text = drp.gitlab_config("git.example.org", ["default"], ssh_port=self.home.config["ssh_port"])
+        self.assertIn("gitlab_shell_ssh_port'] = 23022", text)
+        self.assertIn("gitlab_sshd['listen_address'] = '0.0.0.0:2222'", text)
+        self.home.start_container("fixture-image", published=False)
+        self.assertNotIn("-p", self.home.run.call_args.args[0])
+
+    def test_legacy_config_keeps_original_ssh_port(self):
+        self.assertEqual(self.home.config["ssh_port"], 2222)
+        self.home.run = Mock()
+        self.home.start_container("fixture-image", published=True)
+        self.assertIn("2222:2222", self.home.run.call_args.args[0])
+
+    def test_saved_custom_ssh_port_is_loaded_on_next_run(self):
+        config = drp.load_json(self.etc / "config.json")
+        config["ssh_port"] = 23022
+        drp.save_json(self.etc / "config.json", config)
+        self.assertEqual(drp.Home(self.base, self.etc).config["ssh_port"], 23022)
+
     def test_proxy_nginx_preserves_registry_host_and_https_scheme(self):
         text = drp.nginx_config("git.example.org", "192.168.1.7", cert_name="git.example.org")
         self.assertIn("listen 5050 ssl", text)
@@ -339,6 +364,7 @@ class SafetyTests(HomeCase):
         return backup
 
     def test_success_publishes_after_checks_and_preserves_ssh_keys(self):
+        self.home.config["ssh_port"] = 23022
         backup = self.prepare_apply()
         (self.base / "ssh").mkdir()
         key = self.base / "ssh/ssh_host_ed25519_key"
@@ -349,6 +375,7 @@ class SafetyTests(HomeCase):
         self.assertEqual(state["active"], "a" * 64)
         self.assertIsNone(state["in_progress"])
         self.assertEqual(key.read_text(), "fixture-ssh-key")
+        self.assertIn("gitlab_shell_ssh_port'] = 23022", (self.home.instance / "config/gitlab.rb").read_text())
         self.assertFalse(self.home.staging.exists())
         self.assertFalse((self.home.instance / "data/backups").exists())
         published = self.events.index(("publish", True))

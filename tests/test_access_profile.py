@@ -19,6 +19,9 @@ class AccessProfileTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.path = self.root / "access.json"
+        self.socket_patch = patch("drp_home.socket.socket")
+        self.socket = self.socket_patch.start()
+        self.addCleanup(self.socket_patch.stop)
 
     def test_payload_and_full_unwrap_response_are_accepted_without_gitlab_password(self):
         for data in (PROFILE, {"request_id": "fixture", "data": PROFILE}):
@@ -52,7 +55,7 @@ class AccessProfileTests(unittest.TestCase):
     def configure(self, profile=PROFILE):
         self.path.write_text(json.dumps(profile))
         with patch.object(drp, "BASE", self.root / "home"), patch.object(drp, "ETC", self.root / "etc"):
-            with patch("builtins.input", side_effect=["git.example.org", "direct", "admin@example.org"]):
+            with patch("builtins.input", side_effect=["git.example.org", "direct", "", "admin@example.org"]):
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     drp.configure(self.path)
         return output.getvalue()
@@ -61,6 +64,7 @@ class AccessProfileTests(unittest.TestCase):
         output = self.configure()
         etc = self.root / "etc"
         config = drp.load_json(etc / "config.json")
+        self.assertEqual(config["ssh_port"], 22222)
         self.assertEqual({key: config[key] for key in drp.BACKUP_FIELDS},
                          {key: PROFILE[key] for key in drp.BACKUP_FIELDS})
         self.assertEqual(drp.load_json(etc / "s3.json"), {
@@ -93,7 +97,7 @@ class AccessProfileTests(unittest.TestCase):
     def test_interactive_retries_invalid_answers_without_restarting_setup(self):
         self.path.write_text(json.dumps(PROFILE))
         answers = [str(self.root / "missing.json"), str(self.path),
-                   "https://git.example.org", "git.example.org", "invalid", "1", "bad-email", "admin@example.org"]
+                   "https://git.example.org", "git.example.org", "invalid", "1", "", "bad-email", "admin@example.org"]
         with patch.object(drp, "BASE", self.root / "home"), patch.object(drp, "ETC", self.root / "etc"), \
                 patch("builtins.input", side_effect=answers) as prompts, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
@@ -107,19 +111,21 @@ class AccessProfileTests(unittest.TestCase):
 
     def test_proxy_choice_retries_ip_and_saves_instructions_for_selected_domain(self):
         self.path.write_text(json.dumps(PROFILE))
-        answers = ["git.example.org", "2", "invalid-address", "192.168.1.10"]
+        answers = ["git.example.org", "2", "23022", "invalid-address", "192.168.1.10"]
         with patch.object(drp, "BASE", self.root / "home"), patch.object(drp, "ETC", self.root / "etc"), \
                 patch("builtins.input", side_effect=answers), contextlib.redirect_stdout(io.StringIO()):
             drp.configure(self.path)
         etc = self.root / "etc"
         config = drp.load_json(etc / "config.json")
         self.assertEqual(config["mode"], "proxy")
+        self.assertEqual(config["ssh_port"], 23022)
         self.assertEqual(config["bind_ip"], "192.168.1.10")
         guide = (etc / "nginx-setup.txt").read_text()
         self.assertIn("https://git.example.org", guide)
         self.assertIn("http://192.168.1.10:5080", guide)
         self.assertIn("--cert-name git.example.org", guide)
         self.assertIn("Persistent=true", guide)
+        self.assertIn("внешний 23022 → Ubuntu с GitLab, порт 23022", guide)
         self.assertNotIn(PROFILE["s3_secret_key"], guide)
         self.assertEqual((etc / "nginx-setup.txt").stat().st_mode & 0o777, 0o600)
 
@@ -129,6 +135,28 @@ class AccessProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(drp.Failure, "терминале"):
                 drp.configure()
         self.assertFalse((self.root / "etc/config.json").exists())
+
+    def test_busy_ssh_port_is_retried_before_saving_selected_port(self):
+        self.path.write_text(json.dumps(PROFILE))
+        self.socket.return_value.__enter__.return_value.bind.side_effect = [OSError("occupied"), None]
+        answers = ["git.example.org", "2", "2222", "23022", "192.168.1.10"]
+        with patch.object(drp, "BASE", self.root / "home"), patch.object(drp, "ETC", self.root / "etc"), \
+                patch("builtins.input", side_effect=answers), contextlib.redirect_stdout(io.StringIO()) as output:
+            drp.configure(self.path)
+        config = drp.load_json(self.root / "etc/config.json")
+        self.assertEqual(config["ssh_port"], 23022)
+        self.assertIn("2222 занят", output.getvalue())
+        self.assertEqual([call.args[0] for call in self.socket.return_value.__enter__.return_value.bind.call_args_list],
+                         [("0.0.0.0", 2222), ("0.0.0.0", 23022)])
+
+    def test_invalid_or_conflicting_ssh_ports_are_rejected_before_binding(self):
+        for value in ("0", "65536", "abc", "2222:2222", "-1", "80", "443", "5050", "8080", "5080"):
+            with self.subTest(value=value), self.assertRaises(drp.Failure):
+                drp.available_ssh_port(value)
+        self.socket.assert_not_called()
+        for value in (None, True, 22.5):
+            with self.subTest(value=value), self.assertRaises(drp.Failure):
+                drp.ssh_port_number(value)
 
     def test_user_password_only_profile_explains_admin_bundle_requirement(self):
         for data in ({"password": "private-secret"}, {"data": {"password": "private-secret"}}):
@@ -144,6 +172,7 @@ class AccessProfileTests(unittest.TestCase):
             drp.access_instructions(config)
         self.assertIn("https://git.example.org", output.getvalue())
         self.assertIn("git.example.org:5050", output.getvalue())
+        self.assertIn("ssh://git@git.example.org:22222/", output.getvalue())
         for secret in (PROFILE["password"], PROFILE["s3_secret_key"], PROFILE["restic_password"]):
             self.assertNotIn(secret, output.getvalue())
 

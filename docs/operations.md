@@ -38,10 +38,15 @@ sudo systemctl stop infra-git-drp-home-sync.timer
 После первой установки проверьте локальный вход, clone и реальный pull образа:
 
 ```bash
-git clone ssh://git@git.example.org:2222/group/project.git
+git clone ssh://git@git.example.org:22222/group/project.git
 docker login git.example.org:5050
 docker pull git.example.org:5050/group/project/image:tag
 ```
+
+В примерах замените домен, SSH-порт и пути проектов своими. Для новых установок
+предлагается порт `22222`; выбранный номер сохраняется в конфигурации и используется
+в Docker, ссылках клонирования GitLab и памятке для роутера. Старые конфигурации
+без поля `ssh_port` продолжают использовать `2222`.
 
 Полезные команды:
 
