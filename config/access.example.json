@@ -1,0 +1,10 @@
+{
+  "password": "example-gitlab-password",
+  "repository": "s3:https://s3.example.org/backup-bucket/gitlab",
+  "region": "example-region",
+  "source_host": "gitlab.example.org",
+  "environment": "production",
+  "s3_access_key": "example-access-key",
+  "s3_secret_key": "example-secret-key",
+  "restic_password": "example-restic-password"
+}

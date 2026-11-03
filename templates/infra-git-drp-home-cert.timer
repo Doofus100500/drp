@@ -1,0 +1,12 @@
+[Unit]
+Description=Check infra-git certificate hourly and after boot
+
+[Timer]
+OnCalendar=hourly
+OnBootSec=2min
+Persistent=true
+RandomizedDelaySec=1min
+Unit=infra-git-drp-home-cert.service
+
+[Install]
+WantedBy=timers.target

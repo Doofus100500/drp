@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew infra-git HTTPS certificate
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/infra-git-drp-home renew
+UMask=0077
+TimeoutStartSec=20min

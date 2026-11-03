@@ -1,0 +1,79 @@
+# Обслуживание резервного GitLab
+
+## Обновления и работа при аварии
+
+Проверка новых snapshots выполняется раз в час и после включения Ubuntu.
+У таймеров синхронизации и сертификатов есть `Persistent=true` и `OnBootSec`.
+Если сеть при загрузке ещё недоступна, следующая проверка произойдёт по расписанию.
+Docker возобновляет работу проверенного экземпляра после перезагрузки.
+
+При неизменившемся snapshot повторного восстановления нет. Во время применения
+нового бэкапа GitLab недоступен. Повреждённый snapshot помечается локально;
+его локальные файлы удаляются, затем пробуется более старый snapshot из S3.
+Это требует доступного S3 и сохранённого там предыдущего бэкапа. Полная локальная
+копия для отката не хранится. При ошибках сети или credentials старые snapshots
+не перебираются. Исходный S3-репозиторий скрипт не изменяет.
+
+Исходный `gitlab.rb` не выполняется. Отключаются OIDC, LDAP, исходящая почта,
+CI, расписания, runners, внешние интеграции и зеркала; включаются Silent Mode
+и локальный вход. Используйте заранее выданный пароль. Пароли пользователей
+при восстановлении не перезаписываются.
+
+Экземпляр предназначен для чтения, clone и pull. Принудительного запрета записи
+нет: локальные изменения исчезнут при следующем восстановлении. При переходе
+на самостоятельную работу остановите автоматическое восстановление:
+
+```bash
+sudo systemctl stop infra-git-drp-home-sync.timer
+```
+
+Остановка таймера не прерывает уже выполняющееся восстановление — сначала
+проверьте `systemctl status infra-git-drp-home-sync.service`.
+
+## Проверки и обслуживание
+
+До публикации восстановленного экземпляра проверяются готовность GitLab,
+расшифровка секретов БД, соответствие репозиториев каталогу, Git objects/refs
+и Registry `/v2/` с правильным домашним адресом авторизации.
+После первой установки проверьте локальный вход, clone и реальный pull образа:
+
+```bash
+git clone ssh://git@git.example.org:2222/group/project.git
+docker login git.example.org:5050
+docker pull git.example.org:5050/group/project/image:tag
+```
+
+Полезные команды:
+
+```bash
+sudo infra-git-drp-home status
+sudo systemctl start infra-git-drp-home-sync.service
+sudo infra-git-drp-home retry
+sudo journalctl -u infra-git-drp-home-sync.service
+sudo systemctl list-timers 'infra-git-drp-home-*'
+```
+
+`retry` сбрасывает локальный список отклонённых snapshots и запускает проверку.
+Подробный лог `/opt/infra-git-drp-home/restore.log` доступен только root; он
+может содержать данные из восстанавливаемого GitLab. Не публикуйте его целиком.
+
+Ожидаемый формат snapshot: `gitlab/` с распакованным штатным бэкапом,
+`config/gitlab-secrets.json`, `container.json` с точной версией Docker image,
+`repositories.json` с каталогом репозиториев версии 1. Фильтр по исходному
+host и тегам `gitlab` + `environment` берётся из профиля. Список пропущенных
+компонентов читается из `backup_information.yml`, а не задан в скрипте.
+
+## Проверка изменений разработчиком
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests
+bash -n bootstrap.sh install.sh
+ruby -c scripts/configure_gitlab.rb
+ruby -c scripts/verify_repositories.rb
+```
+
+Тесты не обращаются к рабочим S3/Vault/GitLab. При наличии Restic, Git и Ruby
+дополнительно проверяются настоящий локальный snapshot и Git-репозитории.
+Полное восстановление и выпуск сертификата нужно проверить на целевой Ubuntu.

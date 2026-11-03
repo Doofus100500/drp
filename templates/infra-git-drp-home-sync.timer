@@ -1,0 +1,12 @@
+[Unit]
+Description=Check infra-git backup hourly and after boot
+
+[Timer]
+OnCalendar=hourly
+OnBootSec=5min
+Persistent=true
+RandomizedDelaySec=2min
+Unit=infra-git-drp-home-sync.service
+
+[Install]
+WantedBy=timers.target
