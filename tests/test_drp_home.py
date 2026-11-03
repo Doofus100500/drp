@@ -384,6 +384,49 @@ class SafetyTests(HomeCase):
         self.assertTrue(checks and all(i < published for i in checks))
         self.assertFalse(any(kind == "run" and args[:2] == ["docker", "pull"] for kind, args in self.events))
 
+    def test_puma_stop_failure_never_starts_restore_or_publishes(self):
+        for output in ("timeout: run: puma: (pid 2796) 123s, want down\n",
+                       "fail: /opt/gitlab/service/puma: unable to open supervise/ok\n"):
+            with self.subTest(output=output):
+                backup = self.prepare_apply()
+                original_run = self.home.run.side_effect
+                def run(args, label, **kwargs):
+                    if "stop" in args and "/opt/gitlab/service/puma" in args:
+                        return subprocess.CompletedProcess(args, 1, output, "")
+                    return original_run(args, label, **kwargs)
+                self.home.run.side_effect = run
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(drp.Failure) as error:
+                    self.home.apply(snapshot("a"), backup)
+                self.assertNotIsInstance(error.exception, drp.BadSnapshot)
+                self.assertIn("восстановление БД не запущено", str(error.exception))
+                self.assertFalse(any("gitlab-backup" in call.args[0]
+                                     for call in self.home.run.call_args_list))
+                self.home.start_container.assert_called_once_with(backup["image"], published=False)
+                self.assertTrue((self.home.staging / "gitlab/db/database.sql.gz").is_file())
+                self.assertIsNone(drp.load_json(self.home.state_path)["active"])
+
+    def test_slow_puma_stop_is_allowed_before_restore(self):
+        backup = self.prepare_apply()
+        original_run = self.home.run.side_effect
+        stopped = False
+        def run(args, label, **kwargs):
+            nonlocal stopped
+            if "stop" in args and "/opt/gitlab/service/puma" in args:
+                # Model a service needing 20 seconds, longer than runit's default.
+                wait = int(args[args.index("-w") + 1]) if "-w" in args else 7
+                self.assertGreater(kwargs["timeout"], wait)
+                stopped = wait >= 20
+                return subprocess.CompletedProcess(args, 0 if stopped else 1,
+                                                   "ok: down: puma\n" if stopped else "timeout\n", "")
+            if "gitlab-backup" in args:
+                self.assertTrue(stopped, "Database restore must wait for Puma to stop")
+            return original_run(args, label, **kwargs)
+        self.home.run.side_effect = run
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.home.apply(snapshot("a"), backup)
+        self.assertTrue(stopped)
+        self.assertEqual(drp.load_json(self.home.state_path)["active"], "a" * 64)
+
     def test_doctor_nonzero_failures_with_zero_exit_code_prevent_publication(self):
         backup = self.prepare_apply(doctor="Total: 3 row(s) affected")
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(drp.BadSnapshot):

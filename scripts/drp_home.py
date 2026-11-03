@@ -26,6 +26,7 @@ NETWORK = "infra-git-drp-home-restore"
 LABEL = "infra-git-drp-home.managed"
 CERT = "infra-git-drp-home"
 DEFAULTS = {"startup_timeout": 1800}
+PUMA_STOP_TIMEOUT = 300
 DEFAULT_SSH_PORT = 22222
 BACKUP_FIELDS = ("repository", "region", "source_host", "environment")
 ACCESS_FIELDS = (*BACKUP_FIELDS, "s3_access_key", "s3_secret_key", "restic_password")
@@ -472,6 +473,18 @@ class Home:
             time.sleep(10)
         raise BadSnapshot("GitLab не прошёл readiness-проверку за отведённое время.")
 
+    def stop_puma(self):
+        say("Ожидание остановки Puma перед восстановлением БД (до 5 минут).")
+        # gitlab-ctl stop uses runit's short default wait. sv stop with -w
+        # succeeds only once the service is down; never restore after a timeout.
+        result = self.run(
+            ["docker", "exec", CONTAINER, "/opt/gitlab/embedded/bin/sv",
+             "-w", str(PUMA_STOP_TIMEOUT), "stop", "/opt/gitlab/service/puma"],
+            "Остановка Puma", timeout=PUMA_STOP_TIMEOUT + 30, check=False)
+        if result.returncode:
+            raise Failure("Puma не подтвердил остановку; восстановление БД не запущено. "
+                          "Подробности в restore.log.")
+
     def apply(self, snapshot, backup):
         # Pull and verify prerequisites before discarding the working instance.
         image = self.run(["docker", "image", "inspect", backup["image"]],
@@ -505,7 +518,7 @@ class Home:
                      gitlab_config(self.config["domain"], backup["storages"], ssh_port=self.config["ssh_port"]))
         self.start_container(backup["image"], published=False)
         self.wait_ready()
-        self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "stop", "puma"], "Остановка Puma")
+        self.stop_puma()
         backups_dir = self.instance / "data/backups"
         # Fresh GitLab may have generated an empty backups directory.
         if backups_dir.exists():
@@ -537,7 +550,9 @@ class Home:
                                    ssh_port=self.config["ssh_port"]))
         self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "reconfigure"],
                  "Применение конфигурации GitLab", failure=BadSnapshot)
-        self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "start", "puma"], "Запуск Puma")
+        # Readiness below handles startup waiting, without runit's short timeout.
+        self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "up", "puma"],
+                 "Запуск Puma", timeout=30)
         self.wait_ready()
         doctor = self.run(["docker", "exec", CONTAINER, "gitlab-rake", "gitlab:doctor:secrets"],
                           "Проверка ключей шифрования GitLab", failure=BadSnapshot)
