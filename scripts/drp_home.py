@@ -551,7 +551,8 @@ class Home:
         self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "reconfigure"],
                  "Применение конфигурации GitLab", failure=BadSnapshot)
         # Readiness below handles startup waiting, without runit's short timeout.
-        self.run(["docker", "exec", CONTAINER, "gitlab-ctl", "up", "puma"],
+        self.run(["docker", "exec", CONTAINER, "/opt/gitlab/embedded/bin/sv",
+                  "up", "/opt/gitlab/service/puma"],
                  "Запуск Puma", timeout=30)
         self.wait_ready()
         doctor = self.run(["docker", "exec", CONTAINER, "gitlab-rake", "gitlab:doctor:secrets"],

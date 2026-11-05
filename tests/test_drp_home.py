@@ -349,6 +349,10 @@ class SafetyTests(HomeCase):
         self.home.start_container = Mock(side_effect=lambda image, published: self.events.append(("publish", published)))
         def run(args, label, **kwargs):
             self.events.append(("run", list(args)))
+            if "gitlab-ctl" in args:
+                # Match the public CLI, not the larger internal list of sv methods.
+                self.assertIn(args[args.index("gitlab-ctl") + 1],
+                              {"reconfigure", "start", "stop", "restart", "status"})
             output = ""
             if "/drp/configure_gitlab.rb" in args:
                 output = "DRP_CONFIGURED users=1 projects=0\n"
@@ -383,6 +387,46 @@ class SafetyTests(HomeCase):
                   ("/drp/verify_repositories.rb" in args or "gitlab:doctor:secrets" in args)]
         self.assertTrue(checks and all(i < published for i in checks))
         self.assertFalse(any(kind == "run" and args[:2] == ["docker", "pull"] for kind, args in self.events))
+
+    def test_puma_start_is_followed_by_readiness_before_publication(self):
+        backup = self.prepare_apply()
+        original_run = self.home.run.side_effect
+        started = False
+        ready_checks = 0
+        def run(args, label, **kwargs):
+            nonlocal started
+            if "/opt/gitlab/embedded/bin/sv" in args and "up" in args:
+                self.assertEqual(args[-1], "/opt/gitlab/service/puma")
+                started = True
+            return original_run(args, label, **kwargs)
+        def ready():
+            nonlocal ready_checks
+            ready_checks += 1
+            if ready_checks > 1:
+                self.assertTrue(started)
+            if ready_checks == 2:
+                self.assertNotIn(("publish", True), self.events)
+        self.home.run.side_effect = run
+        self.home.wait_ready.side_effect = ready
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.home.apply(snapshot("a"), backup)
+        self.assertTrue(started)
+        self.assertEqual(ready_checks, 3)
+        self.assertEqual(drp.load_json(self.home.state_path)["active"], "a" * 64)
+
+    def test_puma_start_error_prevents_readiness_and_publication(self):
+        backup = self.prepare_apply()
+        original_run = self.home.run.side_effect
+        def run(args, label, **kwargs):
+            if "/opt/gitlab/embedded/bin/sv" in args and "up" in args:
+                raise drp.Failure("supervisor unavailable")
+            return original_run(args, label, **kwargs)
+        self.home.run.side_effect = run
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(drp.Failure):
+            self.home.apply(snapshot("a"), backup)
+        self.home.wait_ready.assert_called_once()  # Only the fresh instance was checked.
+        self.assertNotIn(("publish", True), self.events)
+        self.assertIsNone(drp.load_json(self.home.state_path)["active"])
 
     def test_puma_stop_failure_never_starts_restore_or_publishes(self):
         for output in ("timeout: run: puma: (pid 2796) 123s, want down\n",
