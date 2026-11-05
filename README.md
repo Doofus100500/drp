@@ -20,7 +20,7 @@
 sudo apt-get update && sudo apt-get install -y ca-certificates curl && (umask 077; t=$(mktemp) || exit 1; trap 'rm -f "$t"' EXIT; for u in https://raw.githubusercontent.com/Doofus100500/drp/master/bootstrap.sh https://gitlab.com/Doofus100500/drp/-/raw/master/bootstrap.sh; do if curl --disable -fLsS --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 "$u" -o "$t" && test -s "$t" && bash -n "$t"; then sudo bash "$t"; exit $?; fi; done; echo 'Не удалось скачать загрузчик с обоих зеркал.' >&2; exit 1)
 ```
 
-При недоступности GitHub команда попробует GitLab.com. Она заработает после публикации проекта в зеркалах.
+При недоступности GitHub команда попробует GitLab.com.
 
 ## 4. Ответьте на вопросы установщика
 
@@ -33,12 +33,15 @@ sudo apt-get update && sudo apt-get install -y ca-certificates curl && (umask 07
 
 На роутере перенаправьте выбранный SSH-порт на такой же порт Ubuntu с GitLab. TCP-порты `80/443/5050` направляются на nginx. Порты `8080/5080` служат для связи nginx с GitLab внутри сети.
 
-Дождитесь завершения восстановления. В конце скрипт покажет адреса GitLab и Registry. Памятка для своего nginx также доступна через `sudo cat /etc/infra-git-drp-home/nginx-setup.txt`.
+Дождитесь завершения восстановления. В конце скрипт покажет адреса GitLab и Registry.
+
+Если выбрали свой nginx, выполните [пошаговую инструкцию](docs/nginx.md).
+Памятка с вашим доменом, IP и SSH-портом: `sudo cat /etc/infra-git-drp-home/nginx-setup.txt`.
 
 ## 5. Проверьте доступ
 
 1. Откройте выведенный адрес GitLab и войдите своим логином и паролем из `password`.
-2. Проверьте клонирование репозитория и скачивание известного образа из Registry.
+2. Проверьте клонирование репозитория и скачивание известного образа из Registry. Для своего nginx проверьте также TLS на `5050` и тестовые login/push/pull по шагам 8–9 инструкции.
 3. Передайте адрес готового GitLab сотрудникам из группы `users`; они входят со своими паролями.
 
 Бэкапы проверяются каждый час и после включения Ubuntu. При применении нового бэкапа GitLab временно недоступен, а локальные изменения заменяются данными бэкапа.

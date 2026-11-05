@@ -279,6 +279,14 @@ server {{
 """
     if not tls:
         return content
+    content = content.replace("# Managed by infra-git-drp-home\n", """# Managed by infra-git-drp-home
+# Include in http context; share this map between the two TLS servers.
+map $http_upgrade $drp_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+""", 1)
     for public, upstream in ((443, 8080), (5050, 5080)):
         content += f"""
 server {{
@@ -297,7 +305,7 @@ server {{
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Port {public};
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $http_connection;
+        proxy_set_header Connection $drp_connection_upgrade;
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_read_timeout 900s;
@@ -709,69 +717,35 @@ def available_ssh_port(value):
 
 
 def proxy_guide(domain, address, ssh_port=DEFAULT_SSH_PORT):
-    return f"""Настройка своего nginx для {domain}
+    path = LIB / "nginx.md"  # Installed next to this script.
+    if not path.is_file():
+        path = LIB.parent / "docs/nginx.md"  # Repository checkout.
+    try:
+        text = path.read_text()
+    except OSError:
+        raise Failure("Не найдена инструкция nginx.md; обновите файлы установщика.") from None
+    values = {"git.example.org": domain, "192.168.1.10": address,
+              "22222": str(ssh_port), "/etc/infra-git-drp-home": str(ETC)}
+    # One pass avoids replacing text inside an already substituted domain or path.
+    return re.sub("|".join(re.escape(key) for key in values),
+                  lambda match: values[match.group()], text)
 
-1. На роутере настройте перенаправление TCP-портов:
-   внешние 80, 443, 5050 → сервер nginx, те же номера портов;
-   внешний {ssh_port} → Ubuntu с GitLab, порт {ssh_port}.
-   Git по SSH подключается напрямую к Ubuntu с GitLab, без HTTP-прокси nginx.
-   A-запись {domain} должна указывать на ваш публичный IPv4.
-   Не добавляйте AAAA без отдельной настройки IPv6.
-   {address} — адрес Ubuntu с GitLab, доступный вашему nginx.
-   В nginx укажите HTTP-адрес GitLab: http://{address}:8080; Registry: http://{address}:5080.
-   Порты 8080/5080 не пробрасывайте в интернет.
 
-2. Скопируйте с Ubuntu на сервер nginx файлы:
-   {ETC}/nginx-http.conf.example
-   {ETC}/nginx.conf.example
-   Дальнейшие команды выполняются на сервере nginx с обычным nginx и Certbot из apt.
-   Если у домена уже есть конфигурация, объедините настройки с ней без второго server block.
-
-3. Для нового сертификата:
-   sudo apt-get update && sudo apt-get install -y certbot
-   sudo mkdir -p /var/lib/infra-git-drp-home-acme
-   Сначала установите nginx-http.conf.example как /etc/nginx/conf.d/infra-git-drp.conf.
-   sudo nginx -t && sudo systemctl reload nginx
-   sudo certbot certonly --webroot -w /var/lib/infra-git-drp-home-acme -d {domain} --cert-name {domain}
-   Certbot спросит email и согласие с условиями Let's Encrypt.
-
-4. Установите nginx.conf.example как /etc/nginx/conf.d/infra-git-drp.conf.
-   Если используете существующий сертификат, укажите его пути в ssl_certificate и ssl_certificate_key.
-   Сохраните Host с портом и X-Forwarded-Proto https в обоих location.
-   sudo nginx -t && sudo systemctl reload nginx
-
-5. Для Certbot создайте файл /etc/letsencrypt/renewal-hooks/deploy/reload-nginx:
-   Содержимое файла (две строки):
-   #!/bin/sh
-   nginx -t && systemctl reload nginx
-   Затем выполните:
-   sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
-
-6. Для проверки продления после включения сервера выполните sudo systemctl edit certbot.timer:
-   [Timer]
-   OnCalendar=
-   OnCalendar=hourly
-   OnBootSec=2min
-   Persistent=true
-   Затем:
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now certbot.timer
-   sudo certbot renew --dry-run
-   Оставьте порт 80 доступным для следующих продлений.
-
-Для Nginx Proxy Manager, контейнерного nginx или Certbot из snap используйте
-их средства настройки сертификатов и обновления. Адреса backend указаны в шаге 1.
-
-7. Откройте https://{domain} и проверьте вход своим логином и выданным паролем.
-   Затем проверьте clone репозитория и pull известного образа из {domain}:5050.
-"""
+def write_proxy_files(config):
+    domain, address = config["domain"], config["bind_ip"]
+    atomic_write(ETC / "nginx-http.conf.example",
+                 nginx_config(domain, backend=address, tls=False), mode=0o644)
+    atomic_write(ETC / "nginx.conf.example",
+                 nginx_config(domain, backend=address, cert_name=domain), mode=0o644)
+    guide = proxy_guide(domain, address, config["ssh_port"])
+    atomic_write(ETC / "nginx-setup.txt", guide)
+    return guide
 
 
 def access_instructions(config):
     domain = config["domain"]
     if config["mode"] == "proxy":
-        guide = proxy_guide(domain, config["bind_ip"], config["ssh_port"])
-        atomic_write(ETC / "nginx-setup.txt", guide)
+        guide = write_proxy_files(config)
         say("\nОсталось настроить ваш nginx. Памятка сохранена: " + str(ETC / "nginx-setup.txt"))
         say(guide)
     else:
@@ -841,11 +815,7 @@ def configure(profile_path=None):
                                 "AWS_SECRET_ACCESS_KEY": profile["s3_secret_key"]})
     atomic_write(ETC / "restic-password", profile["restic_password"] + "\n")
     if mode == "proxy":
-        atomic_write(ETC / "nginx-http.conf.example",
-                     nginx_config(domain, backend=address, tls=False), mode=0o644)
-        atomic_write(ETC / "nginx.conf.example",
-                     nginx_config(domain, backend=address, cert_name=domain), mode=0o644)
-        atomic_write(ETC / "nginx-setup.txt", proxy_guide(domain, address, ssh_port))
+        write_proxy_files({"domain": domain, "bind_ip": address, "ssh_port": ssh_port})
         say("Конфиги и пошаговая памятка nginx созданы в " + str(ETC))
     # Written last, so an incomplete credential setup is not treated as installed.
     save_json(ETC / "config.json", {**DEFAULTS, **{key: profile[key] for key in BACKUP_FIELDS},

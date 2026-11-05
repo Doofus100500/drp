@@ -125,7 +125,7 @@ class AccessProfileTests(unittest.TestCase):
         self.assertIn("http://192.168.1.10:5080", guide)
         self.assertIn("--cert-name git.example.org", guide)
         self.assertIn("Persistent=true", guide)
-        self.assertIn("внешний 23022 → Ubuntu с GitLab, порт 23022", guide)
+        self.assertIn("| `23022` | Ubuntu с GitLab, порт `23022` |", guide)
         self.assertNotIn(PROFILE["s3_secret_key"], guide)
         self.assertEqual((etc / "nginx-setup.txt").stat().st_mode & 0o777, 0o600)
 

@@ -314,6 +314,10 @@ class SafetyTests(HomeCase):
         self.assertIn("proxy_pass http://192.168.1.7:5080", text)
         self.assertIn("proxy_set_header Host $http_host", text)
         self.assertIn("proxy_set_header X-Forwarded-Proto https", text)
+        self.assertNotIn("$http_connection", text)
+        self.assertEqual(text.count("map $http_upgrade $drp_connection_upgrade"), 1)
+        self.assertLess(text.index("map $http_upgrade"), text.index("server {"))
+        self.assertEqual(text.count("proxy_set_header Connection $drp_connection_upgrade;"), 2)
         self.assertNotIn("ssl_certificate", drp.nginx_config("git.example.org", tls=False))
 
     def test_domain_validation_rejects_shell_and_nginx_injection(self):
@@ -321,6 +325,33 @@ class SafetyTests(HomeCase):
                        "example.org:443", "*.example.org", "a\nb.example.org"):
             with self.assertRaises(drp.Failure):
                 drp.domain_name(domain)
+
+    def test_proxy_instructions_refresh_examples_with_saved_network_settings(self):
+        self.home.config.update(mode="proxy", domain="git.22222.example.org",
+                                bind_ip="192.168.1.15", ssh_port=23022)
+        (self.etc / "nginx.conf.example").write_text("stale template")
+        with patch.object(drp, "ETC", self.etc), contextlib.redirect_stdout(io.StringIO()):
+            drp.access_instructions(self.home.config)
+        guide = (self.etc / "nginx-setup.txt").read_text()
+        self.assertIn("https://git.22222.example.org:5050/v2/", guide)
+        self.assertIn("http://192.168.1.15:5080/v2/", guide)
+        self.assertIn("-p 23022 git.22222.example.org", guide)
+        self.assertNotIn("192.168.1.10", guide)
+        self.assertIn(str(self.etc / "nginx.conf.example"), guide)
+        tls = (self.etc / "nginx.conf.example").read_text()
+        self.assertIn("map $http_upgrade $drp_connection_upgrade", tls)
+        self.assertIn("server_name git.22222.example.org;", tls)
+        self.assertIn("proxy_pass http://192.168.1.15:5080;", tls)
+        self.assertNotIn("ssl_certificate", (self.etc / "nginx-http.conf.example").read_text())
+
+    def test_proxy_instructions_load_installed_document(self):
+        installed = self.root / "installed"
+        installed.mkdir()
+        shutil.copyfile(drp.LIB.parent / "docs/nginx.md", installed / "nginx.md")
+        with patch.object(drp, "LIB", installed):
+            text = drp.proxy_guide("home.example.org", "192.168.2.10", 24022)
+        self.assertIn("https://home.example.org:5050/v2/", text)
+        self.assertIn("ssh-keyscan -T 5 -p 24022 home.example.org", text)
 
     def test_failed_restore_is_never_published(self):
         fixture(self.home.staging)

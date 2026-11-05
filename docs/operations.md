@@ -32,6 +32,12 @@ sudo systemctl stop infra-git-drp-home-sync.timer
 
 ## Проверки и обслуживание
 
+[Настройка своего nginx по шагам](nginx.md): сеть и firewall, сертификат,
+продление с deploy hook, проверка публичных адресов и Registry.
+Команда `sudo infra-git-drp-home instructions` в режиме proxy обновляет памятку
+и оба файла `nginx*.conf.example` в `/etc/infra-git-drp-home` по сохранённым настройкам.
+Активный vhost на сервере nginx примените по инструкции.
+
 До публикации восстановленного экземпляра проверяются готовность GitLab,
 расшифровка секретов БД, соответствие репозиториев каталогу, Git objects/refs
 и Registry `/v2/` с правильным домашним адресом авторизации.

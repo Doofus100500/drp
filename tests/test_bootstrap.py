@@ -23,7 +23,7 @@ class BootstrapTests(unittest.TestCase):
         self.work.mkdir()
         self.env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
                     "TEST_ROOT": str(self.root), "MODE": "first-fails", "INSTALL_EXIT": "0"}
-        files = ["install.sh", "scripts/drp_home.py", "scripts/configure_gitlab.rb",
+        files = ["install.sh", "docs/nginx.md", "scripts/drp_home.py", "scripts/configure_gitlab.rb",
                  "scripts/verify_repositories.rb", "templates/infra-git-drp-home-sync.service",
                  "templates/infra-git-drp-home-sync.timer", "templates/infra-git-drp-home-cert.service",
                  "templates/infra-git-drp-home-cert.timer"]

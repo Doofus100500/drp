@@ -27,6 +27,7 @@ systemctl enable --now docker
 install -d -m 0755 /usr/local/lib/infra-git-drp-home
 install -m 0755 "$script_dir/scripts/drp_home.py" /usr/local/lib/infra-git-drp-home/drp_home.py
 install -m 0644 "$script_dir/scripts/"*.rb /usr/local/lib/infra-git-drp-home/
+install -m 0644 "$script_dir/docs/nginx.md" /usr/local/lib/infra-git-drp-home/nginx.md
 ln -sfn /usr/local/lib/infra-git-drp-home/drp_home.py /usr/local/sbin/infra-git-drp-home
 for unit in "$script_dir/templates/"*.service "$script_dir/templates/"*.timer; do
   install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"

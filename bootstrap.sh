@@ -21,6 +21,7 @@ download_project() {
       && test -f "$target/source/scripts/drp_home.py" \
       && test -f "$target/source/scripts/configure_gitlab.rb" \
       && test -f "$target/source/scripts/verify_repositories.rb" \
+      && test -f "$target/source/docs/nginx.md" \
       && test -f "$target/source/templates/infra-git-drp-home-sync.service" \
       && test -f "$target/source/templates/infra-git-drp-home-sync.timer" \
       && test -f "$target/source/templates/infra-git-drp-home-cert.service" \
